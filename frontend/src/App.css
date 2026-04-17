@@ -1,0 +1,72 @@
+.app {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 20px;
+  font-family: system-ui, sans-serif;
+}
+
+h1 {
+  text-align: center;
+  margin-bottom: 10px;
+}
+
+.status-connected {
+  color: #22c55e;
+  text-align: center;
+}
+
+.status-disconnected {
+  color: #ef4444;
+  text-align: center;
+}
+
+.lobbies {
+  margin-top: 30px;
+}
+
+.lobby-list {
+  list-style: none;
+  padding: 0;
+}
+
+.lobby-item {
+  background: #1a1a2e;
+  border-radius: 8px;
+  padding: 15px;
+  margin-bottom: 10px;
+}
+
+.lobby-name {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.lobby-info {
+  display: flex;
+  gap: 15px;
+  font-size: 14px;
+  color: #888;
+}
+
+.game-type {
+  background: #3b82f6;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.status {
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.status.waiting {
+  background: #22c55e;
+  color: white;
+}
+
+.status.playing {
+  background: #f59e0b;
+  color: black;
+}
