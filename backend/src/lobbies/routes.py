@@ -12,9 +12,7 @@ from src.games.models import Game
 from src.games.registry import get_game
 from src.lobbies.enums import LobbyStatus, ParticipantRole
 from src.lobbies.models import Lobby, LobbyParticipant
-from src.lobbies.schemas.create_lobby_request import CreateLobbyRequest
-from src.lobbies.schemas.join_request import JoinRequest
-from src.lobbies.schemas.move_request import MoveRequest
+from src.lobbies.schemas import CreateLobbyRequest, JoinRequest, MoveRequest
 from src.lobbies.service import (
     active_games,
     broadcast_snapshot,

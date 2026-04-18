@@ -9,8 +9,7 @@ from src.auth.dependencies import current_user_id
 from src.auth.jwt_service import create_token
 from src.auth.models import User
 from src.auth.password import hash_password, verify_password
-from src.auth.schemas.login_request import LoginRequest
-from src.auth.schemas.register_request import RegisterRequest
+from src.auth.schemas import LoginRequest, RegisterRequest
 from src.core.db import get_session
 from src.core.exceptions import BadRequest, Conflict, NotFound, Unauthorized
 

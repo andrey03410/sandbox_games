@@ -3,6 +3,7 @@ import logging
 from collections import defaultdict
 
 from fastapi import WebSocket
+from fastapi.encoders import jsonable_encoder
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +33,11 @@ class LobbyWSManager:
     async def broadcast(self, lobby_id: int, payload: dict) -> None:
         async with self._lock:
             targets = list(self._rooms.get(lobby_id, ()))
+        serialized = jsonable_encoder(payload)
         dead: list[WebSocket] = []
         for ws in targets:
             try:
-                await ws.send_json(payload)
+                await ws.send_json(serialized)
             except Exception:
                 dead.append(ws)
         logger.debug(

@@ -6,3 +6,12 @@ class CreateLobbyRequest(BaseModel):
     game_code: str
     config: dict = {}
     max_players: int = Field(default=10, ge=1, le=100)
+
+
+class JoinRequest(BaseModel):
+    role: str
+
+
+class MoveRequest(BaseModel):
+    row: int
+    col: int

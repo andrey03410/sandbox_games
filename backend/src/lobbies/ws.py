@@ -1,12 +1,16 @@
 import json
+import logging
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
 
 from src.auth.jwt_service import decode_token
 from src.core.db import SessionLocal
 from src.core.exceptions import Unauthorized
 from src.core.ws.lobby_ws_manager import lobby_ws_manager
 from src.lobbies.service import build_snapshot, list_lobby_views
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -35,7 +39,7 @@ async def ws_lobby(
             await websocket.send_json({"type": "error", "detail": "lobby not found"})
             await websocket.close()
             return
-        await websocket.send_json({"type": "snapshot", "data": snapshot})
+        await websocket.send_json(jsonable_encoder({"type": "snapshot", "data": snapshot}))
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
@@ -54,6 +58,11 @@ async def ws_lobbies_list(websocket: WebSocket):
             if message.get("type") == "get_lobbies":
                 with SessionLocal() as session:
                     lobbies = list_lobby_views(session)
-                await websocket.send_json({"type": "lobbies_list", "data": lobbies})
-    except Exception:
+                await websocket.send_json(
+                    jsonable_encoder({"type": "lobbies_list", "data": lobbies})
+                )
+    except WebSocketDisconnect:
         pass
+    except Exception:
+        logger.exception("ws /ws handler failed")
+        await websocket.close(code=1011)
