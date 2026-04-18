@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from fastapi import HTTPException
 
+from src.core.exceptions import Unauthorized
 from src.core.settings import settings
 
 
@@ -19,10 +19,10 @@ def decode_token(token: str) -> int:
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="token expired")
+        raise Unauthorized("token expired")
     except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="invalid token")
+        raise Unauthorized("invalid token")
     try:
         return int(payload["sub"])
     except (KeyError, ValueError):
-        raise HTTPException(status_code=401, detail="malformed token payload")
+        raise Unauthorized("malformed token payload")

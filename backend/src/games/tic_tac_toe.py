@@ -1,3 +1,4 @@
+from src.core.exceptions import BadRequest, Forbidden
 from src.games.base_game import BaseGame
 
 
@@ -27,16 +28,16 @@ class TicTacToe(BaseGame):
         col = int(move["col"])
 
         if state["status"] != "in_progress":
-            raise ValueError("game is not in progress")
+            raise BadRequest("game is not in progress")
         symbol = state["assignments"].get(str(user_id))
         if symbol is None:
-            raise PermissionError("you are not a player in this game")
+            raise Forbidden("you are not a player in this game")
         if symbol != state["next_turn"]:
-            raise ValueError("not your turn")
+            raise BadRequest("not your turn")
         if not self._in_bounds(state, row, col):
-            raise ValueError("cell out of bounds")
+            raise BadRequest("cell out of bounds")
         if state["board"][row][col] is not None:
-            raise ValueError("cell already taken")
+            raise BadRequest("cell already taken")
 
         state["board"][row][col] = symbol
         line = self._check_win(state, row, col, symbol)

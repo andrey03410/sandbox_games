@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
 from src.auth.avatars import AVATAR_CODES
@@ -8,6 +8,7 @@ from src.auth.password import hash_password, verify_password
 from src.auth.schemas.login_request import LoginRequest
 from src.auth.schemas.register_request import RegisterRequest
 from src.core.db import engine
+from src.core.exceptions import BadRequest, Conflict, NotFound, Unauthorized
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -24,14 +25,14 @@ def _serialize_user(row) -> dict:
 @router.post("/register", status_code=201)
 def register(req: RegisterRequest):
     if req.avatar not in AVATAR_CODES:
-        raise HTTPException(status_code=400, detail=f"unknown avatar: {req.avatar}")
+        raise BadRequest(f"unknown avatar: {req.avatar}")
     with engine.begin() as conn:
         existing = conn.execute(
             text("SELECT id FROM users WHERE login = :login"),
             {"login": req.login},
         ).first()
         if existing is not None:
-            raise HTTPException(status_code=409, detail="login already taken")
+            raise Conflict("login already taken")
         row = conn.execute(
             text("""
                 INSERT INTO users (login, password_hash, avatar)
@@ -58,7 +59,7 @@ def login(req: LoginRequest):
             {"login": req.login},
         ).first()
     if row is None or not verify_password(req.password, row.password_hash):
-        raise HTTPException(status_code=401, detail="invalid credentials")
+        raise Unauthorized("invalid credentials")
     return {"token": create_token(row.id), "user": _serialize_user(row)}
 
 
@@ -70,5 +71,5 @@ def me(user_id: int = Depends(current_user_id)):
             {"id": user_id},
         ).first()
     if row is None:
-        raise HTTPException(status_code=404, detail="user not found")
+        raise NotFound("user not found")
     return _serialize_user(row)

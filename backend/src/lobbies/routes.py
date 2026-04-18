@@ -1,10 +1,11 @@
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
 from src.auth.dependencies import current_user_id
 from src.core.db import engine
+from src.core.exceptions import BadRequest, Conflict, Forbidden, NotFound
 from src.games.registry import get_game
 from src.lobbies.schemas.create_lobby_request import CreateLobbyRequest
 from src.lobbies.schemas.join_request import JoinRequest
@@ -54,9 +55,7 @@ async def create_lobby(
             {"code": req.game_code},
         ).first()
         if game is None:
-            raise HTTPException(
-                status_code=400, detail=f"unknown game_code: {req.game_code}"
-            )
+            raise BadRequest(f"unknown game_code: {req.game_code}")
         waiting_id = status_id(conn, "waiting")
         new_id = conn.execute(
             text("""
@@ -87,7 +86,7 @@ async def create_lobby(
 def get_lobby(lobby_id: int, user_id: int = Depends(current_user_id)):
     snapshot = build_snapshot(lobby_id)
     if snapshot is None:
-        raise HTTPException(status_code=404, detail="lobby not found")
+        raise NotFound("lobby not found")
     return snapshot
 
 
@@ -98,12 +97,12 @@ async def join_lobby(
     user_id: int = Depends(current_user_id),
 ):
     if req.role not in VALID_ROLES:
-        raise HTTPException(status_code=400, detail="invalid role")
+        raise BadRequest("invalid role")
 
     with engine.begin() as conn:
         row = get_lobby_row(conn, lobby_id)
         if row is None:
-            raise HTTPException(status_code=404, detail="lobby not found")
+            raise NotFound("lobby not found")
 
         existing = conn.execute(
             text("""
@@ -114,7 +113,7 @@ async def join_lobby(
         ).first()
         if existing is not None:
             if existing.role == "host":
-                raise HTTPException(status_code=400, detail="you are the host")
+                raise BadRequest("you are the host")
             if existing.role != req.role:
                 conn.execute(
                     text("""
@@ -134,7 +133,7 @@ async def join_lobby(
                     {"lid": lobby_id},
                 ).scalar_one()
                 if taken >= max_players:
-                    raise HTTPException(status_code=409, detail="no free player slot")
+                    raise Conflict("no free player slot")
             conn.execute(
                 text("""
                     INSERT INTO lobby_participants (lobby_id, user_id, role)
@@ -152,9 +151,9 @@ async def leave_lobby(lobby_id: int, user_id: int = Depends(current_user_id)):
     with engine.begin() as conn:
         row = get_lobby_row(conn, lobby_id)
         if row is None:
-            raise HTTPException(status_code=404, detail="lobby not found")
+            raise NotFound("lobby not found")
         if row.created_by == user_id:
-            raise HTTPException(status_code=400, detail="host cannot leave")
+            raise BadRequest("host cannot leave")
         conn.execute(
             text("""
                 DELETE FROM lobby_participants
@@ -171,13 +170,11 @@ async def start_game(lobby_id: int, user_id: int = Depends(current_user_id)):
     with engine.begin() as conn:
         row = get_lobby_row(conn, lobby_id)
         if row is None:
-            raise HTTPException(status_code=404, detail="lobby not found")
+            raise NotFound("lobby not found")
         if row.created_by != user_id:
-            raise HTTPException(status_code=403, detail="only host can start")
+            raise Forbidden("only host can start")
         if row.status_code != "waiting":
-            raise HTTPException(
-                status_code=400, detail="game already started or finished"
-            )
+            raise BadRequest("game already started or finished")
 
         players = conn.execute(
             text("""
@@ -192,16 +189,11 @@ async def start_game(lobby_id: int, user_id: int = Depends(current_user_id)):
         min_players = int(row.config_schema.get("min_players", 2))
         max_players = int(row.config_schema.get("max_players", min_players))
         if len(player_ids) < min_players:
-            raise HTTPException(
-                status_code=400,
-                detail=f"not enough players: {len(player_ids)}/{min_players}",
-            )
+            raise BadRequest(f"not enough players: {len(player_ids)}/{min_players}")
 
         game = get_game(row.game_code)
         if game is None:
-            raise HTTPException(
-                status_code=400, detail=f"unsupported game: {row.game_code}"
-            )
+            raise BadRequest(f"unsupported game: {row.game_code}")
         state = game.init_state(row.config, player_ids[:max_players])
 
         active_games[lobby_id] = state
@@ -222,18 +214,11 @@ async def make_move(
 ):
     state = active_games.get(lobby_id)
     if state is None:
-        raise HTTPException(status_code=404, detail="no active game")
+        raise NotFound("no active game")
     game = get_game(state["game_code"])
     if game is None:
-        raise HTTPException(
-            status_code=500, detail=f"game impl missing: {state['game_code']}"
-        )
-    try:
-        game.apply_move(state, user_id, req.model_dump())
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise RuntimeError(f"game impl missing: {state['game_code']}")
+    game.apply_move(state, user_id, req.model_dump())
 
     if state["status"] == "finished":
         with engine.begin() as conn:

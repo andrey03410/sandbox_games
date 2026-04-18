@@ -1,10 +1,11 @@
 import json
 
-from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import text
 
 from src.auth.jwt_service import decode_token
 from src.core.db import engine
+from src.core.exceptions import Unauthorized
 from src.core.ws.lobby_ws_manager import lobby_ws_manager
 from src.lobbies.service import build_snapshot
 
@@ -22,7 +23,7 @@ async def ws_lobby(
         return
     try:
         decode_token(token)
-    except HTTPException:
+    except Unauthorized:
         await websocket.close(code=4401)
         return
 

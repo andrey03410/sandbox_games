@@ -1,4 +1,3 @@
-from fastapi import HTTPException
 from sqlalchemy import text
 
 from src.core.db import engine
@@ -12,7 +11,7 @@ def status_id(conn, code: str) -> int:
         text("SELECT id FROM lobby_statuses WHERE code = :c"), {"c": code}
     ).first()
     if row is None:
-        raise HTTPException(status_code=500, detail=f"status '{code}' missing")
+        raise RuntimeError(f"status '{code}' missing in lobby_statuses seed")
     return row.id
 
 
