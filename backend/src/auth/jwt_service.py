@@ -3,21 +3,21 @@ from datetime import datetime, timedelta, timezone
 import jwt
 from fastapi import HTTPException
 
-from src.core.config import JWT_ALGORITHM, JWT_SECRET, JWT_TTL_HOURS
+from src.core.settings import settings
 
 
 def create_token(user_id: int) -> str:
-    exp = datetime.now(timezone.utc) + timedelta(hours=JWT_TTL_HOURS)
+    exp = datetime.now(timezone.utc) + timedelta(hours=settings.jwt_ttl_hours)
     return jwt.encode(
         {"sub": str(user_id), "exp": exp},
-        JWT_SECRET,
-        algorithm=JWT_ALGORITHM,
+        settings.jwt_secret,
+        algorithm=settings.jwt_algorithm,
     )
 
 
 def decode_token(token: str) -> int:
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="token expired")
     except jwt.PyJWTError:
