@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
@@ -9,6 +11,8 @@ from src.auth.schemas.login_request import LoginRequest
 from src.auth.schemas.register_request import RegisterRequest
 from src.core.db import engine
 from src.core.exceptions import BadRequest, Conflict, NotFound, Unauthorized
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -45,6 +49,7 @@ def register(req: RegisterRequest):
                 "avatar": req.avatar,
             },
         ).first()
+    logger.info("user registered id=%s login=%s", row.id, row.login)
     return {"token": create_token(row.id), "user": _serialize_user(row)}
 
 
@@ -60,6 +65,7 @@ def login(req: LoginRequest):
         ).first()
     if row is None or not verify_password(req.password, row.password_hash):
         raise Unauthorized("invalid credentials")
+    logger.info("user login id=%s login=%s", row.id, row.login)
     return {"token": create_token(row.id), "user": _serialize_user(row)}
 
 

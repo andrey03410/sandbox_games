@@ -1,4 +1,5 @@
 import json
+import logging
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
@@ -17,6 +18,8 @@ from src.lobbies.service import (
     get_lobby_row,
     status_id,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/lobbies", tags=["lobbies"])
 
@@ -79,6 +82,10 @@ async def create_lobby(
             """),
             {"lobby_id": new_id, "user_id": user_id},
         )
+    logger.info(
+        "lobby created id=%s game=%s host=%s max_players=%s",
+        new_id, req.game_code, user_id, req.max_players,
+    )
     return {"id": new_id}
 
 
@@ -202,6 +209,10 @@ async def start_game(lobby_id: int, user_id: int = Depends(current_user_id)):
             {"sid": status_id(conn, "in_progress"), "id": lobby_id},
         )
 
+    logger.info(
+        "lobby started id=%s game=%s players=%s",
+        lobby_id, row.game_code, player_ids,
+    )
     await broadcast_snapshot(lobby_id)
     return {"ok": True}
 
@@ -219,6 +230,10 @@ async def make_move(
     if game is None:
         raise RuntimeError(f"game impl missing: {state['game_code']}")
     game.apply_move(state, user_id, req.model_dump())
+    logger.info(
+        "move applied lobby=%s user=%s move=%s status=%s",
+        lobby_id, user_id, req.model_dump(), state["status"],
+    )
 
     if state["status"] == "finished":
         with engine.begin() as conn:
@@ -226,6 +241,9 @@ async def make_move(
                 text("UPDATE lobbies SET status_id = :sid WHERE id = :id"),
                 {"sid": status_id(conn, "finished"), "id": lobby_id},
             )
+        logger.info(
+            "lobby finished id=%s winner=%s", lobby_id, state.get("winner"),
+        )
 
     await broadcast_snapshot(lobby_id)
     return {"ok": True}

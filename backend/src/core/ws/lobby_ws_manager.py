@@ -1,7 +1,10 @@
 import asyncio
+import logging
 from collections import defaultdict
 
 from fastapi import WebSocket
+
+logger = logging.getLogger(__name__)
 
 
 class LobbyWSManager:
@@ -12,6 +15,8 @@ class LobbyWSManager:
     async def connect(self, lobby_id: int, ws: WebSocket) -> None:
         async with self._lock:
             self._rooms[lobby_id].add(ws)
+            size = len(self._rooms[lobby_id])
+        logger.info("ws connect lobby=%s subscribers=%s", lobby_id, size)
 
     async def disconnect(self, lobby_id: int, ws: WebSocket) -> None:
         async with self._lock:
@@ -19,8 +24,10 @@ class LobbyWSManager:
             if room is None:
                 return
             room.discard(ws)
+            size = len(room)
             if not room:
                 self._rooms.pop(lobby_id, None)
+        logger.info("ws disconnect lobby=%s subscribers=%s", lobby_id, size)
 
     async def broadcast(self, lobby_id: int, payload: dict) -> None:
         async with self._lock:
@@ -31,6 +38,10 @@ class LobbyWSManager:
                 await ws.send_json(payload)
             except Exception:
                 dead.append(ws)
+        logger.debug(
+            "ws broadcast lobby=%s type=%s sent=%s dead=%s",
+            lobby_id, payload.get("type"), len(targets) - len(dead), len(dead),
+        )
         if dead:
             async with self._lock:
                 room = self._rooms.get(lobby_id)

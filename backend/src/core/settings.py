@@ -19,6 +19,8 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["*"]
 
+    log_level: str = "INFO"
+
 
 @lru_cache
 def get_settings() -> Settings:
