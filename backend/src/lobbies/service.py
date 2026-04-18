@@ -1,9 +1,13 @@
+from dataclasses import asdict
+
 from sqlalchemy import text
 
 from src.core.db import engine
 from src.core.ws.lobby_ws_manager import lobby_ws_manager
+from src.games.state import BaseState
+from src.lobbies.enums import ParticipantRole
 
-active_games: dict[int, dict] = {}
+active_games: dict[int, BaseState] = {}
 
 
 def status_id(conn, code: str) -> int:
@@ -57,7 +61,10 @@ def get_participants(conn, lobby_id: int) -> list[dict]:
 
 
 def serialize_lobby(row, participants: list[dict]) -> dict:
-    players = [p for p in participants if p["role"] in ("host", "player")]
+    players = [
+        p for p in participants
+        if p["role"] in (ParticipantRole.HOST, ParticipantRole.PLAYER)
+    ]
     return {
         "id": row.id,
         "name": row.name,
@@ -81,10 +88,11 @@ def build_snapshot(lobby_id: int) -> dict | None:
         if row is None:
             return None
         participants = get_participants(conn, lobby_id)
+    state = active_games.get(lobby_id)
     return {
         "lobby": serialize_lobby(row, participants),
         "participants": participants,
-        "game_state": active_games.get(lobby_id),
+        "game_state": asdict(state) if state is not None else None,
     }
 
 

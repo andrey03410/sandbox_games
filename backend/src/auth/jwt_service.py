@@ -1,13 +1,14 @@
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import jwt
 
 from src.core.exceptions import Unauthorized
 from src.core.settings import settings
+from src.core.time import now_utc
 
 
 def create_token(user_id: int) -> str:
-    exp = datetime.now(timezone.utc) + timedelta(hours=settings.jwt_ttl_hours)
+    exp = now_utc() + timedelta(hours=settings.jwt_ttl_hours)
     return jwt.encode(
         {"sub": str(user_id), "exp": exp},
         settings.jwt_secret,
