@@ -1,15 +1,17 @@
-import json
 import logging
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import text
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
 
 from src.auth.dependencies import current_user_id
-from src.core.db import engine
+from src.core.db import get_session
 from src.core.exceptions import BadRequest, Conflict, Forbidden, NotFound
 from src.games.enums import GameStatus
+from src.games.models import Game
 from src.games.registry import get_game
 from src.lobbies.enums import LobbyStatus, ParticipantRole
+from src.lobbies.models import Lobby, LobbyParticipant
 from src.lobbies.schemas.create_lobby_request import CreateLobbyRequest
 from src.lobbies.schemas.join_request import JoinRequest
 from src.lobbies.schemas.move_request import MoveRequest
@@ -17,7 +19,9 @@ from src.lobbies.service import (
     active_games,
     broadcast_snapshot,
     build_snapshot,
+    count_active_participants,
     get_lobby_row,
+    list_lobby_views,
     status_id,
 )
 
@@ -29,69 +33,42 @@ JOINABLE_ROLES = {ParticipantRole.PLAYER, ParticipantRole.SPECTATOR}
 
 
 @router.get("")
-def list_lobbies():
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text("""
-                SELECT
-                    l.id, l.name, l.created_by, l.config, l.max_players, l.created_at,
-                    g.code AS game_code, g.name AS game_name, g.config_schema,
-                    s.code AS status_code, s.name AS status_name,
-                    (SELECT login FROM users WHERE id = l.created_by) AS creator_login,
-                    COALESCE(
-                        (SELECT COUNT(*) FROM lobby_participants
-                         WHERE lobby_id = l.id AND role IN (:host, :player)),
-                        0
-                    ) AS players_count
-                FROM lobbies l
-                JOIN games          g ON g.id = l.game_id
-                JOIN lobby_statuses s ON s.id = l.status_id
-                ORDER BY l.id DESC
-            """),
-            {"host": ParticipantRole.HOST, "player": ParticipantRole.PLAYER},
-        ).all()
-    return [dict(r._mapping) for r in rows]
+def list_lobbies(session: Session = Depends(get_session)):
+    return list_lobby_views(session)
 
 
 @router.post("", status_code=201)
 async def create_lobby(
-    req: CreateLobbyRequest, user_id: int = Depends(current_user_id)
+    req: CreateLobbyRequest,
+    user_id: int = Depends(current_user_id),
+    session: Session = Depends(get_session),
 ):
-    with engine.begin() as conn:
-        game = conn.execute(
-            text("SELECT id FROM games WHERE code = :code"),
-            {"code": req.game_code},
-        ).first()
-        if game is None:
-            raise BadRequest(f"unknown game_code: {req.game_code}")
-        waiting_id = status_id(conn, LobbyStatus.WAITING)
-        new_id = conn.execute(
-            text("""
-                INSERT INTO lobbies (name, game_id, status_id, created_by, config, max_players)
-                VALUES (:name, :game_id, :status_id, :created_by, CAST(:config AS JSONB), :max_players)
-                RETURNING id
-            """),
-            {
-                "name": req.name,
-                "game_id": game.id,
-                "status_id": waiting_id,
-                "created_by": user_id,
-                "config": json.dumps(req.config),
-                "max_players": req.max_players,
-            },
-        ).scalar_one()
-        conn.execute(
-            text("""
-                INSERT INTO lobby_participants (lobby_id, user_id, role)
-                VALUES (:lobby_id, :user_id, :role)
-            """),
-            {"lobby_id": new_id, "user_id": user_id, "role": ParticipantRole.HOST},
+    game_id = session.scalar(select(Game.id).where(Game.code == req.game_code))
+    if game_id is None:
+        raise BadRequest(f"unknown game_code: {req.game_code}")
+
+    lobby = Lobby(
+        name=req.name,
+        game_id=game_id,
+        status_id=status_id(session, LobbyStatus.WAITING),
+        created_by=user_id,
+        config=req.config,
+        max_players=req.max_players,
+    )
+    session.add(lobby)
+    session.flush()
+
+    session.add(
+        LobbyParticipant(
+            lobby_id=lobby.id, user_id=user_id, role=ParticipantRole.HOST
         )
+    )
+    session.commit()
     logger.info(
         "lobby created id=%s game=%s host=%s max_players=%s",
-        new_id, req.game_code, user_id, req.max_players,
+        lobby.id, req.game_code, user_id, req.max_players,
     )
-    return {"id": new_id}
+    return {"id": lobby.id}
 
 
 @router.get("/{lobby_id}")
@@ -107,6 +84,7 @@ async def join_lobby(
     lobby_id: int,
     req: JoinRequest,
     user_id: int = Depends(current_user_id),
+    session: Session = Depends(get_session),
 ):
     try:
         role = ParticipantRole(req.role)
@@ -115,116 +93,106 @@ async def join_lobby(
     if role not in JOINABLE_ROLES:
         raise BadRequest("invalid role")
 
-    with engine.begin() as conn:
-        row = get_lobby_row(conn, lobby_id)
-        if row is None:
-            raise NotFound("lobby not found")
+    row = get_lobby_row(session, lobby_id)
+    if row is None:
+        raise NotFound("lobby not found")
 
-        existing = conn.execute(
-            text("""
-                SELECT role FROM lobby_participants
-                WHERE lobby_id = :lid AND user_id = :uid
-            """),
-            {"lid": lobby_id, "uid": user_id},
-        ).first()
-        if existing is not None:
-            if existing.role == ParticipantRole.HOST:
-                raise BadRequest("you are the host")
-            if existing.role != role:
-                conn.execute(
-                    text("""
-                        UPDATE lobby_participants SET role = :r
-                        WHERE lobby_id = :lid AND user_id = :uid
-                    """),
-                    {"r": role, "lid": lobby_id, "uid": user_id},
-                )
-        else:
-            if role is ParticipantRole.PLAYER:
-                max_players = int(row.config_schema.get("max_players", row.max_players))
-                taken = conn.execute(
-                    text("""
-                        SELECT COUNT(*) FROM lobby_participants
-                        WHERE lobby_id = :lid AND role IN (:host, :player)
-                    """),
-                    {
-                        "lid": lobby_id,
-                        "host": ParticipantRole.HOST,
-                        "player": ParticipantRole.PLAYER,
-                    },
-                ).scalar_one()
-                if taken >= max_players:
-                    raise Conflict("no free player slot")
-            conn.execute(
-                text("""
-                    INSERT INTO lobby_participants (lobby_id, user_id, role)
-                    VALUES (:lid, :uid, :r)
-                """),
-                {"lid": lobby_id, "uid": user_id, "r": role},
+    existing = session.scalar(
+        select(LobbyParticipant).where(
+            LobbyParticipant.lobby_id == lobby_id,
+            LobbyParticipant.user_id == user_id,
+        )
+    )
+    if existing is not None:
+        if existing.role == ParticipantRole.HOST:
+            raise BadRequest("you are the host")
+        if existing.role != role:
+            existing.role = role
+    else:
+        if role is ParticipantRole.PLAYER:
+            max_players = int(
+                row.config_schema.get("max_players", row.max_players)
             )
+            taken = count_active_participants(session, lobby_id)
+            if taken >= max_players:
+                raise Conflict("no free player slot")
+        session.add(
+            LobbyParticipant(lobby_id=lobby_id, user_id=user_id, role=role)
+        )
+    session.commit()
 
     await broadcast_snapshot(lobby_id)
     return {"ok": True}
 
 
 @router.post("/{lobby_id}/leave")
-async def leave_lobby(lobby_id: int, user_id: int = Depends(current_user_id)):
-    with engine.begin() as conn:
-        row = get_lobby_row(conn, lobby_id)
-        if row is None:
-            raise NotFound("lobby not found")
-        if row.created_by == user_id:
-            raise BadRequest("host cannot leave")
-        conn.execute(
-            text("""
-                DELETE FROM lobby_participants
-                WHERE lobby_id = :lid AND user_id = :uid
-            """),
-            {"lid": lobby_id, "uid": user_id},
+async def leave_lobby(
+    lobby_id: int,
+    user_id: int = Depends(current_user_id),
+    session: Session = Depends(get_session),
+):
+    row = get_lobby_row(session, lobby_id)
+    if row is None:
+        raise NotFound("lobby not found")
+    if row.created_by == user_id:
+        raise BadRequest("host cannot leave")
+
+    session.execute(
+        LobbyParticipant.__table__.delete().where(
+            LobbyParticipant.lobby_id == lobby_id,
+            LobbyParticipant.user_id == user_id,
         )
+    )
+    session.commit()
+
     await broadcast_snapshot(lobby_id)
     return {"ok": True}
 
 
 @router.post("/{lobby_id}/start")
-async def start_game(lobby_id: int, user_id: int = Depends(current_user_id)):
-    with engine.begin() as conn:
-        row = get_lobby_row(conn, lobby_id)
-        if row is None:
-            raise NotFound("lobby not found")
-        if row.created_by != user_id:
-            raise Forbidden("only host can start")
-        if row.status_code != LobbyStatus.WAITING:
-            raise BadRequest("game already started or finished")
+async def start_game(
+    lobby_id: int,
+    user_id: int = Depends(current_user_id),
+    session: Session = Depends(get_session),
+):
+    row = get_lobby_row(session, lobby_id)
+    if row is None:
+        raise NotFound("lobby not found")
+    if row.created_by != user_id:
+        raise Forbidden("only host can start")
+    if row.status_code != LobbyStatus.WAITING:
+        raise BadRequest("game already started or finished")
 
-        players = conn.execute(
-            text("""
-                SELECT user_id FROM lobby_participants
-                WHERE lobby_id = :lid AND role IN (:host, :player)
-                ORDER BY joined_at
-            """),
-            {
-                "lid": lobby_id,
-                "host": ParticipantRole.HOST,
-                "player": ParticipantRole.PLAYER,
-            },
-        ).all()
-        player_ids = [p.user_id for p in players]
-
-        min_players = int(row.config_schema.get("min_players", 2))
-        max_players = int(row.config_schema.get("max_players", min_players))
-        if len(player_ids) < min_players:
-            raise BadRequest(f"not enough players: {len(player_ids)}/{min_players}")
-
-        game = get_game(row.game_code)
-        if game is None:
-            raise BadRequest(f"unsupported game: {row.game_code}")
-        state = game.init_state(row.config, player_ids[:max_players])
-
-        active_games[lobby_id] = state
-        conn.execute(
-            text("UPDATE lobbies SET status_id = :sid WHERE id = :id"),
-            {"sid": status_id(conn, LobbyStatus.IN_PROGRESS), "id": lobby_id},
+    player_ids = list(
+        session.scalars(
+            select(LobbyParticipant.user_id)
+            .where(
+                LobbyParticipant.lobby_id == lobby_id,
+                LobbyParticipant.role.in_(
+                    [ParticipantRole.HOST, ParticipantRole.PLAYER]
+                ),
+            )
+            .order_by(LobbyParticipant.joined_at)
         )
+    )
+
+    min_players = int(row.config_schema.get("min_players", 2))
+    max_players = int(row.config_schema.get("max_players", min_players))
+    if len(player_ids) < min_players:
+        raise BadRequest(f"not enough players: {len(player_ids)}/{min_players}")
+
+    game = get_game(row.game_code)
+    if game is None:
+        raise BadRequest(f"unsupported game: {row.game_code}")
+    state = game.init_state(row.config, player_ids[:max_players])
+
+    active_games[lobby_id] = state
+    session.execute(
+        update(Lobby)
+        .where(Lobby.id == lobby_id)
+        .values(status_id=status_id(session, LobbyStatus.IN_PROGRESS))
+    )
+    session.commit()
 
     logger.info(
         "lobby started id=%s game=%s players=%s",
@@ -239,6 +207,7 @@ async def make_move(
     lobby_id: int,
     req: MoveRequest,
     user_id: int = Depends(current_user_id),
+    session: Session = Depends(get_session),
 ):
     state = active_games.get(lobby_id)
     if state is None:
@@ -253,14 +222,13 @@ async def make_move(
     )
 
     if state.status is GameStatus.FINISHED:
-        with engine.begin() as conn:
-            conn.execute(
-                text("UPDATE lobbies SET status_id = :sid WHERE id = :id"),
-                {"sid": status_id(conn, LobbyStatus.FINISHED), "id": lobby_id},
-            )
-        logger.info(
-            "lobby finished id=%s winner=%s", lobby_id, state.winner,
+        session.execute(
+            update(Lobby)
+            .where(Lobby.id == lobby_id)
+            .values(status_id=status_id(session, LobbyStatus.FINISHED))
         )
+        session.commit()
+        logger.info("lobby finished id=%s winner=%s", lobby_id, state.winner)
 
     await broadcast_snapshot(lobby_id)
     return {"ok": True}

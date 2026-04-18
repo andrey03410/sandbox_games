@@ -1,52 +1,98 @@
 from dataclasses import asdict
 
-from sqlalchemy import text
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
-from src.core.db import engine
+from src.auth.models import User
+from src.core.db import SessionLocal
 from src.core.ws.lobby_ws_manager import lobby_ws_manager
+from src.games.models import Game
 from src.games.state import BaseState
 from src.lobbies.enums import ParticipantRole
+from src.lobbies.models import Lobby, LobbyParticipant, LobbyStatus
 
 active_games: dict[int, BaseState] = {}
 
 
-def status_id(conn, code: str) -> int:
-    row = conn.execute(
-        text("SELECT id FROM lobby_statuses WHERE code = :c"), {"c": code}
-    ).first()
-    if row is None:
+def status_id(session: Session, code: str) -> int:
+    sid = session.scalar(select(LobbyStatus.id).where(LobbyStatus.code == code))
+    if sid is None:
         raise RuntimeError(f"status '{code}' missing in lobby_statuses seed")
-    return row.id
+    return sid
 
 
-def get_lobby_row(conn, lobby_id: int):
-    return conn.execute(
-        text("""
-            SELECT
-                l.id, l.name, l.created_by, l.config, l.max_players,
-                l.created_at,
-                g.code AS game_code, g.name AS game_name, g.config_schema,
-                s.code AS status_code, s.name AS status_name,
-                (SELECT login FROM users WHERE id = l.created_by) AS creator_login
-            FROM lobbies l
-            JOIN games          g ON g.id = l.game_id
-            JOIN lobby_statuses s ON s.id = l.status_id
-            WHERE l.id = :id
-        """),
-        {"id": lobby_id},
+LOBBY_VIEW_COLUMNS = (
+    Lobby.id,
+    Lobby.name,
+    Lobby.created_by,
+    Lobby.config,
+    Lobby.max_players,
+    Lobby.created_at,
+    Game.code.label("game_code"),
+    Game.name.label("game_name"),
+    Game.config_schema,
+    LobbyStatus.code.label("status_code"),
+    LobbyStatus.name.label("status_name"),
+    User.login.label("creator_login"),
+)
+
+
+def _lobby_view_stmt():
+    return (
+        select(*LOBBY_VIEW_COLUMNS)
+        .join(Game, Game.id == Lobby.game_id)
+        .join(LobbyStatus, LobbyStatus.id == Lobby.status_id)
+        .join(User, User.id == Lobby.created_by)
+    )
+
+
+def get_lobby_row(session: Session, lobby_id: int):
+    return session.execute(
+        _lobby_view_stmt().where(Lobby.id == lobby_id)
     ).first()
 
 
-def get_participants(conn, lobby_id: int) -> list[dict]:
-    rows = conn.execute(
-        text("""
-            SELECT p.user_id, p.role, p.joined_at, u.login, u.avatar
-            FROM lobby_participants p
-            JOIN users u ON u.id = p.user_id
-            WHERE p.lobby_id = :id
-            ORDER BY p.joined_at
-        """),
-        {"id": lobby_id},
+def count_active_participants(session: Session, lobby_id: int) -> int:
+    return (
+        session.scalar(
+            select(func.count())
+            .select_from(LobbyParticipant)
+            .where(
+                LobbyParticipant.lobby_id == lobby_id,
+                LobbyParticipant.role.in_(
+                    [ParticipantRole.HOST, ParticipantRole.PLAYER]
+                ),
+            )
+        )
+        or 0
+    )
+
+
+def list_lobby_views(session: Session) -> list[dict]:
+    rows = session.execute(
+        _lobby_view_stmt().order_by(Lobby.id.desc())
+    ).all()
+    return [
+        {
+            **dict(r._mapping),
+            "players_count": count_active_participants(session, r.id),
+        }
+        for r in rows
+    ]
+
+
+def get_participants(session: Session, lobby_id: int) -> list[dict]:
+    rows = session.execute(
+        select(
+            LobbyParticipant.user_id,
+            LobbyParticipant.role,
+            LobbyParticipant.joined_at,
+            User.login,
+            User.avatar,
+        )
+        .join(User, User.id == LobbyParticipant.user_id)
+        .where(LobbyParticipant.lobby_id == lobby_id)
+        .order_by(LobbyParticipant.joined_at)
     ).all()
     return [
         {
@@ -83,11 +129,11 @@ def serialize_lobby(row, participants: list[dict]) -> dict:
 
 
 def build_snapshot(lobby_id: int) -> dict | None:
-    with engine.connect() as conn:
-        row = get_lobby_row(conn, lobby_id)
+    with SessionLocal() as session:
+        row = get_lobby_row(session, lobby_id)
         if row is None:
             return None
-        participants = get_participants(conn, lobby_id)
+        participants = get_participants(session, lobby_id)
     state = active_games.get(lobby_id)
     return {
         "lobby": serialize_lobby(row, participants),

@@ -1,15 +1,17 @@
 import logging
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import text
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from src.auth.avatars import AVATAR_CODES
 from src.auth.dependencies import current_user_id
 from src.auth.jwt_service import create_token
+from src.auth.models import User
 from src.auth.password import hash_password, verify_password
 from src.auth.schemas.login_request import LoginRequest
 from src.auth.schemas.register_request import RegisterRequest
-from src.core.db import engine
+from src.core.db import get_session
 from src.core.exceptions import BadRequest, Conflict, NotFound, Unauthorized
 
 logger = logging.getLogger(__name__)
@@ -17,65 +19,52 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-def _serialize_user(row) -> dict:
+def _serialize_user(user: User) -> dict:
     return {
-        "id": row.id,
-        "login": row.login,
-        "avatar": row.avatar,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "id": user.id,
+        "login": user.login,
+        "avatar": user.avatar,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
     }
 
 
 @router.post("/register", status_code=201)
-def register(req: RegisterRequest):
+def register(req: RegisterRequest, session: Session = Depends(get_session)):
     if req.avatar not in AVATAR_CODES:
         raise BadRequest(f"unknown avatar: {req.avatar}")
-    with engine.begin() as conn:
-        existing = conn.execute(
-            text("SELECT id FROM users WHERE login = :login"),
-            {"login": req.login},
-        ).first()
-        if existing is not None:
-            raise Conflict("login already taken")
-        row = conn.execute(
-            text("""
-                INSERT INTO users (login, password_hash, avatar)
-                VALUES (:login, :hash, :avatar)
-                RETURNING id, login, avatar, created_at
-            """),
-            {
-                "login": req.login,
-                "hash": hash_password(req.password),
-                "avatar": req.avatar,
-            },
-        ).first()
-    logger.info("user registered id=%s login=%s", row.id, row.login)
-    return {"token": create_token(row.id), "user": _serialize_user(row)}
+
+    existing = session.scalar(select(User).where(User.login == req.login))
+    if existing is not None:
+        raise Conflict("login already taken")
+
+    user = User(
+        login=req.login,
+        password_hash=hash_password(req.password),
+        avatar=req.avatar,
+    )
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    logger.info("user registered id=%s login=%s", user.id, user.login)
+    return {"token": create_token(user.id), "user": _serialize_user(user)}
 
 
 @router.post("/login")
-def login(req: LoginRequest):
-    with engine.connect() as conn:
-        row = conn.execute(
-            text("""
-                SELECT id, login, password_hash, avatar, created_at
-                FROM users WHERE login = :login
-            """),
-            {"login": req.login},
-        ).first()
-    if row is None or not verify_password(req.password, row.password_hash):
+def login(req: LoginRequest, session: Session = Depends(get_session)):
+    user = session.scalar(select(User).where(User.login == req.login))
+    if user is None or not verify_password(req.password, user.password_hash):
         raise Unauthorized("invalid credentials")
-    logger.info("user login id=%s login=%s", row.id, row.login)
-    return {"token": create_token(row.id), "user": _serialize_user(row)}
+    logger.info("user login id=%s login=%s", user.id, user.login)
+    return {"token": create_token(user.id), "user": _serialize_user(user)}
 
 
 @router.get("/me")
-def me(user_id: int = Depends(current_user_id)):
-    with engine.connect() as conn:
-        row = conn.execute(
-            text("SELECT id, login, avatar, created_at FROM users WHERE id = :id"),
-            {"id": user_id},
-        ).first()
-    if row is None:
+def me(
+    user_id: int = Depends(current_user_id),
+    session: Session = Depends(get_session),
+):
+    user = session.get(User, user_id)
+    if user is None:
         raise NotFound("user not found")
-    return _serialize_user(row)
+    return _serialize_user(user)

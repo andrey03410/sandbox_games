@@ -1,14 +1,12 @@
 import json
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
-from sqlalchemy import text
 
 from src.auth.jwt_service import decode_token
-from src.core.db import engine
+from src.core.db import SessionLocal
 from src.core.exceptions import Unauthorized
 from src.core.ws.lobby_ws_manager import lobby_ws_manager
-from src.lobbies.enums import ParticipantRole
-from src.lobbies.service import build_snapshot
+from src.lobbies.service import build_snapshot, list_lobby_views
 
 router = APIRouter()
 
@@ -54,30 +52,8 @@ async def ws_lobbies_list(websocket: WebSocket):
             data = await websocket.receive_text()
             message = json.loads(data)
             if message.get("type") == "get_lobbies":
-                with engine.connect() as conn:
-                    rows = conn.execute(
-                        text("""
-                            SELECT
-                                l.id, l.name, l.max_players,
-                                g.code AS game_code, g.name AS game_name,
-                                s.code AS status_code, s.name AS status_name,
-                                COALESCE(
-                                    (SELECT COUNT(*) FROM lobby_participants
-                                     WHERE lobby_id = l.id AND role IN (:host, :player)),
-                                    0
-                                ) AS players_count,
-                                l.config
-                            FROM lobbies l
-                            JOIN games          g ON g.id = l.game_id
-                            JOIN lobby_statuses s ON s.id = l.status_id
-                            ORDER BY l.id DESC
-                        """),
-                        {
-                            "host": ParticipantRole.HOST,
-                            "player": ParticipantRole.PLAYER,
-                        },
-                    ).all()
-                    lobbies = [dict(r._mapping) for r in rows]
+                with SessionLocal() as session:
+                    lobbies = list_lobby_views(session)
                 await websocket.send_json({"type": "lobbies_list", "data": lobbies})
     except Exception:
         pass
